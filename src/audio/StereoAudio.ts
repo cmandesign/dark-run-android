@@ -102,21 +102,24 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
     : Buffer.from(binary, 'binary').toString('base64');
 }
 
-// Frequency mapping for operation types
-const OPERATION_FREQUENCIES: Record<string, number> = {
-  '+': 523, // C5 - bright, positive
-  '-': 330, // E4 - lower, cautious
-  '×': 659, // E5 - high, exciting
-  '÷': 392, // G4 - medium
-};
-
+/**
+ * Single-threaded audio manager.
+ *
+ * All speech goes through one queue so announcements never overlap,
+ * loop, or fight with each other. Stereo WAV tones (collect sounds)
+ * play independently since they don't use the TTS engine.
+ */
 class StereoAudioManager {
   private webAudioContext: AudioContext | null = null;
   private initialized = false;
   private soundCache: Map<string, Audio.Sound> = new Map();
-  private fileCache: Map<string, string> = new Map(); // cacheKey -> file path
+  private fileCache: Map<string, string> = new Map();
   private audioEnabled = true;
   private speechEnabled = true;
+
+  // --- Single announcement queue ---
+  private speaking = false;
+  private stopped = false;
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -130,7 +133,6 @@ class StereoAudioManager {
         }
       }
 
-      // Configure audio for mobile
       if (Platform.OS !== 'web') {
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
@@ -154,10 +156,81 @@ class StereoAudioManager {
     this.speechEnabled = enabled;
   }
 
+  // ─── Speech: single owner ───
+
   /**
-   * Stop any pending speech immediately.
+   * Interrupt any current speech and speak new text immediately.
+   * This is the ONLY way speech is triggered — no scattered Speech.speak calls.
    */
-  stopSpeech(): void {
+  speak(text: string): void {
+    if (!this.speechEnabled) return;
+
+    try {
+      this.stopped = false;
+      Speech.stop();
+      Speech.speak(text, {
+        rate: 1.3,
+        pitch: 1.0,
+        language: 'en-US',
+        onDone: () => {
+          this.speaking = false;
+        },
+        onError: () => {
+          this.speaking = false;
+        },
+        onStopped: () => {
+          this.speaking = false;
+        },
+      });
+      this.speaking = true;
+    } catch (e) {
+      console.warn('Speech failed:', e);
+      this.speaking = false;
+    }
+  }
+
+  /**
+   * Speak text and wait for it to finish before resolving.
+   */
+  speakAndWait(text: string): Promise<void> {
+    if (!this.speechEnabled) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      try {
+        this.stopped = false;
+        Speech.stop();
+        Speech.speak(text, {
+          rate: 1.3,
+          pitch: 1.0,
+          language: 'en-US',
+          onDone: () => {
+            this.speaking = false;
+            resolve();
+          },
+          onError: () => {
+            this.speaking = false;
+            resolve();
+          },
+          onStopped: () => {
+            this.speaking = false;
+            resolve();
+          },
+        });
+        this.speaking = true;
+      } catch (e) {
+        console.warn('Speech failed:', e);
+        this.speaking = false;
+        resolve();
+      }
+    });
+  }
+
+  /**
+   * Stop all speech and prevent queued callbacks from firing new speech.
+   */
+  stop(): void {
+    this.stopped = true;
+    this.speaking = false;
     try {
       Speech.stop();
     } catch (_) {
@@ -166,235 +239,36 @@ class StereoAudioManager {
   }
 
   /**
-   * Play a directional beep tone panned to the specified lane.
+   * Announce a falling object with lane context.
+   * Example: "left, plus 3"
    */
-  async playDirectionalTone(
+  announceObject(
     lane: Lane,
-    operationType: string,
-    durationMs: number = 200
-  ): Promise<void> {
-    if (!this.audioEnabled) return;
-
-    const frequency = OPERATION_FREQUENCIES[operationType] || 440;
-
-    if (Platform.OS === 'web') {
-      this.playWebTone(lane, frequency, durationMs);
-    } else {
-      await this.playNativeTone(lane, frequency, durationMs);
-    }
-  }
-
-  private playWebTone(lane: Lane, frequency: number, durationMs: number) {
-    if (!this.webAudioContext) return;
-
-    if (this.webAudioContext.state === 'suspended') {
-      this.webAudioContext.resume();
-    }
-
-    const ctx = this.webAudioContext;
-    const oscillator = ctx.createOscillator();
-    const gainNode = ctx.createGain();
-    const panner = ctx.createStereoPanner();
-
-    oscillator.type = 'sine';
-    oscillator.frequency.value = frequency;
-    gainNode.gain.value = 0.4;
-    panner.pan.value = lane === 'left' ? -1 : 1;
-
-    const now = ctx.currentTime;
-    const endTime = now + durationMs / 1000;
-    gainNode.gain.setValueAtTime(0.4, now);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, endTime);
-
-    oscillator.connect(gainNode);
-    gainNode.connect(panner);
-    panner.connect(ctx.destination);
-
-    oscillator.start(now);
-    oscillator.stop(endTime);
-  }
-
-  /**
-   * Write a WAV to a temp file and play it.
-   * Data URIs don't work reliably with expo-av on Android.
-   */
-  private async playNativeTone(
-    lane: Lane,
-    frequency: number,
-    durationMs: number
-  ): Promise<void> {
-    try {
-      const cacheKey = `${lane}_${frequency}_${durationMs}`;
-
-      // Check if we already have a cached Sound object
-      let sound = this.soundCache.get(cacheKey);
-      if (sound) {
-        await sound.setPositionAsync(0);
-        await sound.playAsync();
-        return;
-      }
-
-      // Generate WAV and write to temp file
-      let fileUri = this.fileCache.get(cacheKey);
-      if (!fileUri) {
-        const wavBytes = generateStereoWav(frequency, durationMs, lane);
-        const base64 = uint8ArrayToBase64(wavBytes);
-        fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
-        await FileSystem.writeAsStringAsync(fileUri, base64, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        this.fileCache.set(cacheKey, fileUri);
-      }
-
-      const result = await Audio.Sound.createAsync({ uri: fileUri });
-      sound = result.sound;
-      this.soundCache.set(cacheKey, sound);
-      await sound.playAsync();
-    } catch (e) {
-      console.warn('Native tone playback failed:', e);
-    }
-  }
-
-  /**
-   * Speak text using text-to-speech.
-   * Stops any pending speech first to avoid queue buildup.
-   */
-  speak(text: string): void {
-    if (!this.speechEnabled) return;
-
-    try {
-      Speech.stop();
-      Speech.speak(text, {
-        rate: 1.3,
-        pitch: 1.0,
-        language: 'en-US',
-      });
-    } catch (e) {
-      console.warn('Speech failed:', e);
-    }
-  }
-
-  /**
-   * Speak text, returning a promise that resolves when speech finishes.
-   */
-  speakAndWait(text: string): Promise<void> {
-    if (!this.speechEnabled) return Promise.resolve();
-
-    return new Promise((resolve) => {
-      try {
-        Speech.stop();
-        Speech.speak(text, {
-          rate: 1.3,
-          pitch: 1.0,
-          language: 'en-US',
-          onDone: () => resolve(),
-          onError: () => resolve(),
-          onStopped: () => resolve(),
-        });
-      } catch (e) {
-        console.warn('Speech failed:', e);
-        resolve();
-      }
-    });
-  }
-
-  /**
-   * Announce a falling object: directional tone + speech with lane context.
-   */
-  async announceObject(
-    lane: Lane,
-    operationType: string,
+    _operationType: string,
     speechText: string
-  ): Promise<void> {
-    await this.playDirectionalTone(lane, operationType);
-
-    // Include lane in speech so user knows direction even though TTS is not panned
-    setTimeout(() => {
-      this.speak(`${lane}, ${speechText}`);
-    }, 250);
+  ): void {
+    if (this.stopped) return;
+    this.speak(`${lane}, ${speechText}`);
   }
 
   /**
-   * Play a celebration sound (centered, pleasant chord).
+   * Announce level complete — stops any in-flight speech first.
    */
-  async playSuccess(): Promise<void> {
-    if (!this.audioEnabled) return;
-
-    if (Platform.OS === 'web' && this.webAudioContext) {
-      const ctx = this.webAudioContext;
-      if (ctx.state === 'suspended') await ctx.resume();
-
-      const now = ctx.currentTime;
-      [523, 659, 784].forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0.3, now + i * 0.1);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.1 + 0.5);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now + i * 0.1);
-        osc.stop(now + i * 0.1 + 0.5);
-      });
-    } else {
-      await this.playNativeTone('left', 784, 300); // reuse with center-ish tone
-    }
+  announceLevelComplete(level: number, score: number): void {
+    this.speak(`Level ${level} complete! Score: ${score}`);
   }
 
   /**
-   * Play a game over sound.
+   * Announce game over — stops any in-flight speech first.
    */
-  async playGameOver(): Promise<void> {
-    if (!this.audioEnabled) return;
-
-    if (Platform.OS === 'web' && this.webAudioContext) {
-      const ctx = this.webAudioContext;
-      if (ctx.state === 'suspended') await ctx.resume();
-
-      const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(300, now);
-      osc.frequency.exponentialRampToValueAtTime(100, now + 0.8);
-      gain.gain.setValueAtTime(0.3, now);
-      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.8);
-    } else {
-      // Play a low centered tone for game over
-      try {
-        const cacheKey = 'gameover_center';
-        let sound = this.soundCache.get(cacheKey);
-        if (sound) {
-          await sound.setPositionAsync(0);
-          await sound.playAsync();
-          return;
-        }
-        let fileUri = this.fileCache.get(cacheKey);
-        if (!fileUri) {
-          const wavBytes = generateStereoWav(200, 500, 'center');
-          const base64 = uint8ArrayToBase64(wavBytes);
-          fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
-          await FileSystem.writeAsStringAsync(fileUri, base64, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          this.fileCache.set(cacheKey, fileUri);
-        }
-        const { sound: s } = await Audio.Sound.createAsync({ uri: fileUri });
-        this.soundCache.set(cacheKey, s);
-        await s.playAsync();
-      } catch (e) {
-        console.warn('Game over sound failed:', e);
-      }
-    }
+  announceGameOver(score: number): void {
+    this.speak(`Game over. Score: ${score}`);
   }
 
+  // ─── Sound effects (stereo WAV, independent of TTS) ───
+
   /**
-   * Play a collect sound when player picks up an object.
+   * Play a stereo collect chirp panned to the lane where the object was picked up.
    */
   async playCollect(lane: Lane): Promise<void> {
     if (!this.audioEnabled) return;
@@ -424,16 +298,126 @@ class StereoAudioManager {
   }
 
   /**
-   * Announce score change via speech.
+   * Play a celebration sound.
    */
-  announceScore(score: number): void {
-    this.speak(`Score: ${score}`);
+  async playSuccess(): Promise<void> {
+    if (!this.audioEnabled) return;
+
+    if (Platform.OS === 'web' && this.webAudioContext) {
+      const ctx = this.webAudioContext;
+      if (ctx.state === 'suspended') await ctx.resume();
+
+      const now = ctx.currentTime;
+      [523, 659, 784].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.3, now + i * 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.1 + 0.5);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + i * 0.1);
+        osc.stop(now + i * 0.1 + 0.5);
+      });
+    } else {
+      await this.playNativeTone('left', 784, 300);
+    }
   }
 
   /**
-   * Clean up audio resources.
+   * Play a game over sound.
+   */
+  async playGameOver(): Promise<void> {
+    if (!this.audioEnabled) return;
+
+    if (Platform.OS === 'web' && this.webAudioContext) {
+      const ctx = this.webAudioContext;
+      if (ctx.state === 'suspended') await ctx.resume();
+
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(300, now);
+      osc.frequency.exponentialRampToValueAtTime(100, now + 0.8);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.8);
+    } else {
+      try {
+        const cacheKey = 'gameover_center';
+        let sound = this.soundCache.get(cacheKey);
+        if (sound) {
+          await sound.setPositionAsync(0);
+          await sound.playAsync();
+          return;
+        }
+        let fileUri = this.fileCache.get(cacheKey);
+        if (!fileUri) {
+          const wavBytes = generateStereoWav(200, 500, 'center');
+          const base64 = uint8ArrayToBase64(wavBytes);
+          fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+          await FileSystem.writeAsStringAsync(fileUri, base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          this.fileCache.set(cacheKey, fileUri);
+        }
+        const { sound: s } = await Audio.Sound.createAsync({ uri: fileUri });
+        this.soundCache.set(cacheKey, s);
+        await s.playAsync();
+      } catch (e) {
+        console.warn('Game over sound failed:', e);
+      }
+    }
+  }
+
+  // ─── Internal: native stereo tone via temp WAV file ───
+
+  private async playNativeTone(
+    lane: Lane,
+    frequency: number,
+    durationMs: number
+  ): Promise<void> {
+    try {
+      const cacheKey = `${lane}_${frequency}_${durationMs}`;
+
+      let sound = this.soundCache.get(cacheKey);
+      if (sound) {
+        await sound.setPositionAsync(0);
+        await sound.playAsync();
+        return;
+      }
+
+      let fileUri = this.fileCache.get(cacheKey);
+      if (!fileUri) {
+        const wavBytes = generateStereoWav(frequency, durationMs, lane);
+        const base64 = uint8ArrayToBase64(wavBytes);
+        fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+        await FileSystem.writeAsStringAsync(fileUri, base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        this.fileCache.set(cacheKey, fileUri);
+      }
+
+      const result = await Audio.Sound.createAsync({ uri: fileUri });
+      sound = result.sound;
+      this.soundCache.set(cacheKey, sound);
+      await sound.playAsync();
+    } catch (e) {
+      console.warn('Native tone playback failed:', e);
+    }
+  }
+
+  /**
+   * Clean up all audio resources.
    */
   async cleanup(): Promise<void> {
+    this.stop();
+
     for (const sound of this.soundCache.values()) {
       try {
         await sound.unloadAsync();
