@@ -3,6 +3,7 @@ import { Audio } from 'expo-av';
 import * as Speech from 'expo-speech';
 import * as FileSystem from 'expo-file-system';
 import { Lane } from '../game/types';
+import { AUDIO_ASSETS } from './audioAssets';
 
 /**
  * Generates a stereo WAV file as a Uint8Array.
@@ -105,9 +106,11 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 /**
  * Single-threaded audio manager.
  *
- * All speech goes through one queue so announcements never overlap,
- * loop, or fight with each other. Stereo WAV tones (collect sounds)
- * play independently since they don't use the TTS engine.
+ * Speech playback uses pre-recorded audio files when available (generated
+ * by scripts/generate-audio.js via ElevenLabs), falling back to the
+ * system TTS engine (expo-speech) for any entries not yet recorded.
+ *
+ * Stereo WAV tones (collect sounds) play independently.
  */
 class StereoAudioManager {
   private webAudioContext: AudioContext | null = null;
@@ -120,6 +123,7 @@ class StereoAudioManager {
   // --- Single announcement queue ---
   private speaking = false;
   private stopped = false;
+  private currentSound: Audio.Sound | null = null;
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -156,17 +160,145 @@ class StereoAudioManager {
     this.speechEnabled = enabled;
   }
 
+  // ─── Pre-recorded audio playback ───
+
+  /**
+   * Check if a pre-recorded asset exists for the given key.
+   */
+  private hasPreRecorded(key: string): boolean {
+    return key in AUDIO_ASSETS && AUDIO_ASSETS[key] != null;
+  }
+
+  /**
+   * Play a pre-recorded audio asset by key.
+   * Returns true if playback started, false if asset not found.
+   */
+  private async playPreRecorded(key: string): Promise<boolean> {
+    if (!this.hasPreRecorded(key)) return false;
+
+    try {
+      let sound = this.soundCache.get(key);
+      if (sound) {
+        await sound.setPositionAsync(0);
+        await sound.playAsync();
+        this.currentSound = sound;
+        return true;
+      }
+
+      const { sound: newSound } = await Audio.Sound.createAsync(AUDIO_ASSETS[key]);
+      this.soundCache.set(key, newSound);
+      this.currentSound = newSound;
+      await newSound.playAsync();
+      return true;
+    } catch (e) {
+      console.warn(`Pre-recorded playback failed for "${key}":`, e);
+      return false;
+    }
+  }
+
+  /**
+   * Play a pre-recorded audio asset and wait for it to finish.
+   * Returns true if played successfully, false if asset not found.
+   */
+  private playPreRecordedAndWait(key: string): Promise<boolean> {
+    if (!this.hasPreRecorded(key)) return Promise.resolve(false);
+
+    return new Promise(async (resolve) => {
+      try {
+        let sound = this.soundCache.get(key);
+
+        if (!sound) {
+          const result = await Audio.Sound.createAsync(AUDIO_ASSETS[key]);
+          sound = result.sound;
+          this.soundCache.set(key, sound);
+        } else {
+          await sound.setPositionAsync(0);
+        }
+
+        this.currentSound = sound;
+
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            this.speaking = false;
+            this.currentSound = null;
+            resolve(true);
+          }
+        });
+
+        this.speaking = true;
+        await sound.playAsync();
+      } catch (e) {
+        console.warn(`Pre-recorded playback failed for "${key}":`, e);
+        this.speaking = false;
+        this.currentSound = null;
+        resolve(false);
+      }
+    });
+  }
+
   // ─── Speech: single owner ───
 
   /**
-   * Interrupt any current speech and speak new text immediately.
-   * This is the ONLY way speech is triggered — no scattered Speech.speak calls.
+   * Build an asset key from a text context.
+   * Returns undefined if no matching pattern is recognized.
    */
-  speak(text: string): void {
+  private resolveAssetKey(
+    text: string,
+    context?: { type: 'announce'; lane: Lane; speech: string }
+      | { type: 'level_intro'; level: number }
+      | { type: 'countdown'; value: number | 'go' }
+      | { type: 'level_complete'; level: number }
+      | { type: 'game_over' }
+  ): string | undefined {
+    if (!context) return undefined;
+
+    switch (context.type) {
+      case 'announce':
+        return `announce_${context.lane}_${context.speech.replace(/ /g, '_')}`;
+      case 'level_intro':
+        return `level_intro_${context.level}`;
+      case 'countdown':
+        return context.value === 'go' ? 'countdown_go' : `countdown_${context.value}`;
+      case 'level_complete':
+        return `level_complete_${context.level}`;
+      case 'game_over':
+        return 'game_over';
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Interrupt any current speech/playback and speak new text immediately.
+   * Tries pre-recorded audio first, then falls back to TTS.
+   */
+  async speak(
+    text: string,
+    context?: { type: 'announce'; lane: Lane; speech: string }
+      | { type: 'level_intro'; level: number }
+      | { type: 'countdown'; value: number | 'go' }
+      | { type: 'level_complete'; level: number }
+      | { type: 'game_over' }
+  ): Promise<void> {
     if (!this.speechEnabled) return;
 
     try {
       this.stopped = false;
+
+      // Stop any current playback
+      this.stopCurrentPlayback();
+
+      // Try pre-recorded audio
+      const key = this.resolveAssetKey(text, context);
+      if (key) {
+        const played = await this.playPreRecorded(key);
+        if (played) {
+          this.speaking = true;
+          return;
+        }
+      }
+
+      // Fallback: TTS
       Speech.stop();
       Speech.speak(text, {
         rate: 1.3,
@@ -191,13 +323,33 @@ class StereoAudioManager {
 
   /**
    * Speak text and wait for it to finish before resolving.
+   * Tries pre-recorded audio first, then falls back to TTS.
    */
-  speakAndWait(text: string): Promise<void> {
-    if (!this.speechEnabled) return Promise.resolve();
+  async speakAndWait(
+    text: string,
+    context?: { type: 'announce'; lane: Lane; speech: string }
+      | { type: 'level_intro'; level: number }
+      | { type: 'countdown'; value: number | 'go' }
+      | { type: 'level_complete'; level: number }
+      | { type: 'game_over' }
+  ): Promise<void> {
+    if (!this.speechEnabled) return;
 
-    return new Promise((resolve) => {
-      try {
-        this.stopped = false;
+    try {
+      this.stopped = false;
+
+      // Stop any current playback
+      this.stopCurrentPlayback();
+
+      // Try pre-recorded audio
+      const key = this.resolveAssetKey(text, context);
+      if (key) {
+        const played = await this.playPreRecordedAndWait(key);
+        if (played) return;
+      }
+
+      // Fallback: TTS
+      return new Promise((resolve) => {
         Speech.stop();
         Speech.speak(text, {
           rate: 1.3,
@@ -217,24 +369,35 @@ class StereoAudioManager {
           },
         });
         this.speaking = true;
-      } catch (e) {
-        console.warn('Speech failed:', e);
-        this.speaking = false;
-        resolve();
-      }
-    });
+      });
+    } catch (e) {
+      console.warn('Speech failed:', e);
+      this.speaking = false;
+    }
   }
 
   /**
-   * Stop all speech and prevent queued callbacks from firing new speech.
+   * Stop all speech/playback and prevent queued callbacks from firing.
    */
   stop(): void {
     this.stopped = true;
     this.speaking = false;
+    this.stopCurrentPlayback();
     try {
       Speech.stop();
     } catch (_) {
       // ignore
+    }
+  }
+
+  private stopCurrentPlayback(): void {
+    if (this.currentSound) {
+      try {
+        this.currentSound.stopAsync().catch(() => {});
+      } catch (_) {
+        // ignore
+      }
+      this.currentSound = null;
     }
   }
 
@@ -248,21 +411,38 @@ class StereoAudioManager {
     speechText: string
   ): void {
     if (this.stopped) return;
-    this.speak(`${lane}, ${speechText}`);
+    this.speak(`${lane}, ${speechText}`, {
+      type: 'announce',
+      lane,
+      speech: speechText,
+    });
   }
 
   /**
-   * Announce level complete — stops any in-flight speech first.
+   * Announce level complete.
+   * Pre-recorded: "Level N complete!" (without dynamic score).
+   * TTS fallback: "Level N complete! Score: X" (with score).
    */
   announceLevelComplete(level: number, score: number): void {
-    this.speak(`Level ${level} complete! Score: ${score}`);
+    const key = `level_complete_${level}`;
+    if (this.hasPreRecorded(key)) {
+      this.speak(`Level ${level} complete!`, { type: 'level_complete', level });
+    } else {
+      this.speak(`Level ${level} complete! Score: ${score}`);
+    }
   }
 
   /**
-   * Announce game over — stops any in-flight speech first.
+   * Announce game over.
+   * Pre-recorded: "Game over" (without dynamic score).
+   * TTS fallback: "Game over. Score: X" (with score).
    */
   announceGameOver(score: number): void {
-    this.speak(`Game over. Score: ${score}`);
+    if (this.hasPreRecorded('game_over')) {
+      this.speak('Game over', { type: 'game_over' });
+    } else {
+      this.speak(`Game over. Score: ${score}`);
+    }
   }
 
   // ─── Sound effects (stereo WAV, independent of TTS) ───

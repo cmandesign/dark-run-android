@@ -72,7 +72,8 @@ export default function GameScreen({
 
       // Wait for level intro to finish before starting countdown
       await stereoAudio.speakAndWait(
-        `Level ${level}. ${levelConfig.speechDescription}. Get ready!`
+        `Level ${level}. ${levelConfig.speechDescription}. Get ready!`,
+        { type: 'level_intro', level }
       );
       if (cancelled) return;
       setCountdown(3);
@@ -96,9 +97,9 @@ export default function GameScreen({
 
     const timer = setTimeout(() => {
       if (countdown === 1) {
-        stereoAudio.speak('Go!');
+        stereoAudio.speak('Go!', { type: 'countdown', value: 'go' });
       } else {
-        stereoAudio.speak(`${countdown}`);
+        stereoAudio.speak(`${countdown}`, { type: 'countdown', value: countdown });
       }
       setCountdown((c) => c - 1);
     }, 1000);

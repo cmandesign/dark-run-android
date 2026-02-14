@@ -1,0 +1,63 @@
+{
+  "locale": "en",
+  "voice": {
+    "provider": "elevenlabs",
+    "voiceId": "21m00Tcm4TlvDq8ikWAM",
+    "modelId": "eleven_monolingual_v1",
+    "settings": {
+      "stability": 0.7,
+      "similarity_boost": 0.8
+    }
+  },
+  "entries": {
+    "announce_left_plus_1": "left, plus 1",
+    "announce_left_plus_2": "left, plus 2",
+    "announce_left_plus_3": "left, plus 3",
+    "announce_left_plus_5": "left, plus 5",
+    "announce_left_plus_10": "left, plus 10",
+    "announce_left_plus_15": "left, plus 15",
+    "announce_left_minus_1": "left, minus 1",
+    "announce_left_minus_2": "left, minus 2",
+    "announce_left_minus_3": "left, minus 3",
+    "announce_left_minus_5": "left, minus 5",
+    "announce_left_minus_10": "left, minus 10",
+    "announce_left_times_2": "left, times 2",
+    "announce_left_times_3": "left, times 3",
+    "announce_left_divided_by_2": "left, divided by 2",
+    "announce_right_plus_1": "right, plus 1",
+    "announce_right_plus_2": "right, plus 2",
+    "announce_right_plus_3": "right, plus 3",
+    "announce_right_plus_5": "right, plus 5",
+    "announce_right_plus_10": "right, plus 10",
+    "announce_right_plus_15": "right, plus 15",
+    "announce_right_minus_1": "right, minus 1",
+    "announce_right_minus_2": "right, minus 2",
+    "announce_right_minus_3": "right, minus 3",
+    "announce_right_minus_5": "right, minus 5",
+    "announce_right_minus_10": "right, minus 10",
+    "announce_right_times_2": "right, times 2",
+    "announce_right_times_3": "right, times 3",
+    "announce_right_divided_by_2": "right, divided by 2",
+
+    "level_intro_1": "Level 1. Reach a score of 10. Only addition! Get ready!",
+    "level_intro_2": "Level 2. Reach 15. Watch out for minus operations! Get ready!",
+    "level_intro_3": "Level 3. Reach 20. Plus and minus, getting faster! Get ready!",
+    "level_intro_4": "Level 4. Reach 30. Multiply is here! Get ready!",
+    "level_intro_5": "Level 5. Reach 50. All operations available! Get ready!",
+    "level_intro_6": "Level 6. Reach 100. Fast and furious! Get ready!",
+
+    "countdown_3": "3",
+    "countdown_2": "2",
+    "countdown_1": "1",
+    "countdown_go": "Go!",
+
+    "level_complete_1": "Level 1 complete!",
+    "level_complete_2": "Level 2 complete!",
+    "level_complete_3": "Level 3 complete!",
+    "level_complete_4": "Level 4 complete!",
+    "level_complete_5": "Level 5 complete!",
+    "level_complete_6": "Level 6 complete!",
+
+    "game_over": "Game over"
+  }
+}
