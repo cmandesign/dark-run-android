@@ -1,7 +1,7 @@
 import { Platform } from 'react-native';
 import { Audio } from 'expo-av';
 import * as Speech from 'expo-speech';
-import { File as FSFile, Paths } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system';
 import { Lane } from '../game/types';
 
 /**
@@ -87,6 +87,19 @@ function generateStereoWav(
   }
 
   return new Uint8Array(buffer);
+}
+
+/**
+ * Convert Uint8Array to base64 string.
+ */
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return typeof btoa !== 'undefined'
+    ? btoa(binary)
+    : Buffer.from(binary, 'binary').toString('base64');
 }
 
 // Frequency mapping for operation types
@@ -225,13 +238,11 @@ class StereoAudioManager {
       let fileUri = this.fileCache.get(cacheKey);
       if (!fileUri) {
         const wavBytes = generateStereoWav(frequency, durationMs, lane);
-        const file = new FSFile(Paths.cache, `tone_${cacheKey}.wav`);
-        if (file.exists) {
-          file.delete();
-        }
-        file.create();
-        file.write(wavBytes);
-        fileUri = file.uri;
+        const base64 = uint8ArrayToBase64(wavBytes);
+        fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+        await FileSystem.writeAsStringAsync(fileUri, base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
         this.fileCache.set(cacheKey, fileUri);
       }
 
@@ -366,13 +377,11 @@ class StereoAudioManager {
         let fileUri = this.fileCache.get(cacheKey);
         if (!fileUri) {
           const wavBytes = generateStereoWav(200, 500, 'center');
-          const file = new FSFile(Paths.cache, `tone_${cacheKey}.wav`);
-          if (file.exists) {
-            file.delete();
-          }
-          file.create();
-          file.write(wavBytes);
-          fileUri = file.uri;
+          const base64 = uint8ArrayToBase64(wavBytes);
+          fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+          await FileSystem.writeAsStringAsync(fileUri, base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
           this.fileCache.set(cacheKey, fileUri);
         }
         const { sound: s } = await Audio.Sound.createAsync({ uri: fileUri });

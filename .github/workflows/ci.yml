@@ -3,8 +3,18 @@ name: CI
 on:
   push:
     branches: ['*']
+    tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.0) — leave empty for CI-only run'
+        required: false
+        type: string
+
+permissions:
+  contents: write
 
 env:
   NODE_VERSION: 22
@@ -44,11 +54,16 @@ jobs:
       - name: Export web build
         run: npx expo export --platform web
 
+      - name: Archive web build
+        run: |
+          cd dist
+          zip -r ../dark-run-web.zip .
+
       - name: Upload web artifact
         uses: actions/upload-artifact@v4
         with:
           name: web-build
-          path: dist/
+          path: dark-run-web.zip
           retention-days: 7
 
   build-android:
@@ -88,13 +103,85 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/build.gradle', 'android/app/build.gradle') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Build debug APK
+      - name: Build release APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleRelease
+
+      - name: Rename APK
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
+          cp "$APK_PATH" dark-run.apk
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-debug-build
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: android-build
+          path: dark-run.apk
           retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.version
+    runs-on: ubuntu-latest
+    needs: [build-web, build-android]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "name=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download web build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+          path: artifacts/
+
+      - name: Download Android build
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build
+          path: artifacts/
+
+      - name: Create tag (manual dispatch only)
+        if: github.event.inputs.version
+        run: |
+          git tag "v${{ inputs.version }}"
+          git push origin "v${{ inputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "Dark Run ${{ steps.version.outputs.name }}"
+          generate_release_notes: true
+          body: |
+            ## Downloads
+
+            | Platform | File | Description |
+            |----------|------|-------------|
+            | Android  | `dark-run.apk` | Install directly on Android devices |
+            | Web      | `dark-run-web.zip` | Static web build — extract and serve with any web server |
+
+            ### Android Installation
+            1. Download `dark-run.apk`
+            2. Enable "Install from unknown sources" in Android settings
+            3. Open the APK file to install
+
+            ### Web Deployment
+            1. Download and extract `dark-run-web.zip`
+            2. Serve the contents with any static file server (e.g. `npx serve dist/`)
+            3. Open in a browser — works on desktop and mobile
+
+            ### Accessibility
+            Wear headphones for the full stereo audio experience — objects in the left lane are announced in the left ear, and right lane in the right ear.
+          files: |
+            artifacts/dark-run.apk
+            artifacts/dark-run-web.zip
