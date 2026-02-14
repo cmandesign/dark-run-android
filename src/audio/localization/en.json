@@ -3,7 +3,7 @@
   "voice": {
     "provider": "elevenlabs",
     "voiceId": "21m00Tcm4TlvDq8ikWAM",
-    "modelId": "eleven_monolingual_v1",
+    "modelId": "eleven_flash_v2_5",
     "settings": {
       "stability": 0.7,
       "similarity_boost": 0.8

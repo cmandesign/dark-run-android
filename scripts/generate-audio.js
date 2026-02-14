@@ -131,7 +131,7 @@ async function main() {
   }
 
   const voiceId = voice.voiceId;
-  const modelId = voice.modelId || 'eleven_monolingual_v1';
+  const modelId = voice.modelId || 'eleven_flash_v2_5';
   const voiceSettings = voice.settings || { stability: 0.7, similarity_boost: 0.8 };
 
   // Ensure output directory exists
