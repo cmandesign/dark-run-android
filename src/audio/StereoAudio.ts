@@ -1,18 +1,19 @@
 import { Platform } from 'react-native';
 import { Audio } from 'expo-av';
 import * as Speech from 'expo-speech';
+import * as FileSystem from 'expo-file-system';
 import { Lane } from '../game/types';
 
 /**
- * Generates a stereo WAV file as a base64 data URI.
+ * Generates a stereo WAV file as a Uint8Array.
  * The tone is panned to the specified channel (left/right/center).
  */
-function generateStereoWavDataUri(
+function generateStereoWav(
   frequency: number,
   durationMs: number,
   pan: Lane | 'center',
   sampleRate: number = 44100
-): string {
+): Uint8Array {
   const numSamples = Math.floor((sampleRate * durationMs) / 1000);
   const numChannels = 2;
   const bitsPerSample = 16;
@@ -25,7 +26,6 @@ function generateStereoWavDataUri(
   const buffer = new ArrayBuffer(fileSize);
   const view = new DataView(buffer);
 
-  // Helper to write a string to DataView
   const writeStr = (offset: number, str: string) => {
     for (let i = 0; i < str.length; i++) {
       view.setUint8(offset + i, str.charCodeAt(i));
@@ -59,7 +59,6 @@ function generateStereoWavDataUri(
     const t = i / sampleRate;
     const rawSample = Math.sin(2 * Math.PI * frequency * t);
 
-    // Envelope: fade in/out to avoid clicks
     let envelope = 1;
     if (i < fadeSamples) {
       envelope = i / fadeSamples;
@@ -69,12 +68,11 @@ function generateStereoWavDataUri(
 
     const sample = rawSample * envelope * 0.6;
 
-    // Pan: left channel gets full signal when pan=left, right gets silence, etc.
     let leftSample: number;
     let rightSample: number;
     if (pan === 'left') {
       leftSample = sample;
-      rightSample = sample * 0.1; // slight bleed for naturalness
+      rightSample = sample * 0.1;
     } else if (pan === 'right') {
       leftSample = sample * 0.1;
       rightSample = sample;
@@ -88,20 +86,20 @@ function generateStereoWavDataUri(
     view.setInt16(offset + 2, Math.floor(rightSample * 32767), true);
   }
 
-  // Convert ArrayBuffer to base64 data URI
-  const bytes = new Uint8Array(buffer);
+  return new Uint8Array(buffer);
+}
+
+/**
+ * Convert Uint8Array to base64 string.
+ */
+function uint8ArrayToBase64(bytes: Uint8Array): string {
   let binary = '';
   for (let i = 0; i < bytes.length; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
-
-  // Use global btoa (available in React Native and web)
-  const base64 =
-    typeof btoa !== 'undefined'
-      ? btoa(binary)
-      : Buffer.from(binary, 'binary').toString('base64');
-
-  return `data:audio/wav;base64,${base64}`;
+  return typeof btoa !== 'undefined'
+    ? btoa(binary)
+    : Buffer.from(binary, 'binary').toString('base64');
 }
 
 // Frequency mapping for operation types
@@ -116,6 +114,7 @@ class StereoAudioManager {
   private webAudioContext: AudioContext | null = null;
   private initialized = false;
   private soundCache: Map<string, Audio.Sound> = new Map();
+  private fileCache: Map<string, string> = new Map(); // cacheKey -> file path
   private audioEnabled = true;
   private speechEnabled = true;
 
@@ -156,6 +155,17 @@ class StereoAudioManager {
   }
 
   /**
+   * Stop any pending speech immediately.
+   */
+  stopSpeech(): void {
+    try {
+      Speech.stop();
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  /**
    * Play a directional beep tone panned to the specified lane.
    */
   async playDirectionalTone(
@@ -177,7 +187,6 @@ class StereoAudioManager {
   private playWebTone(lane: Lane, frequency: number, durationMs: number) {
     if (!this.webAudioContext) return;
 
-    // Resume context if suspended (browser autoplay policy)
     if (this.webAudioContext.state === 'suspended') {
       this.webAudioContext.resume();
     }
@@ -192,7 +201,6 @@ class StereoAudioManager {
     gainNode.gain.value = 0.4;
     panner.pan.value = lane === 'left' ? -1 : 1;
 
-    // Fade out to avoid clicks
     const now = ctx.currentTime;
     const endTime = now + durationMs / 1000;
     gainNode.gain.setValueAtTime(0.4, now);
@@ -206,6 +214,10 @@ class StereoAudioManager {
     oscillator.stop(endTime);
   }
 
+  /**
+   * Write a WAV to a temp file and play it.
+   * Data URIs don't work reliably with expo-av on Android.
+   */
   private async playNativeTone(
     lane: Lane,
     frequency: number,
@@ -213,17 +225,30 @@ class StereoAudioManager {
   ): Promise<void> {
     try {
       const cacheKey = `${lane}_${frequency}_${durationMs}`;
-      let sound = this.soundCache.get(cacheKey);
 
-      if (!sound) {
-        const uri = generateStereoWavDataUri(frequency, durationMs, lane);
-        const result = await Audio.Sound.createAsync({ uri });
-        sound = result.sound;
-        this.soundCache.set(cacheKey, sound);
-      } else {
+      // Check if we already have a cached Sound object
+      let sound = this.soundCache.get(cacheKey);
+      if (sound) {
         await sound.setPositionAsync(0);
+        await sound.playAsync();
+        return;
       }
 
+      // Generate WAV and write to temp file
+      let fileUri = this.fileCache.get(cacheKey);
+      if (!fileUri) {
+        const wavBytes = generateStereoWav(frequency, durationMs, lane);
+        const base64 = uint8ArrayToBase64(wavBytes);
+        fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+        await FileSystem.writeAsStringAsync(fileUri, base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        this.fileCache.set(cacheKey, fileUri);
+      }
+
+      const result = await Audio.Sound.createAsync({ uri: fileUri });
+      sound = result.sound;
+      this.soundCache.set(cacheKey, sound);
       await sound.playAsync();
     } catch (e) {
       console.warn('Native tone playback failed:', e);
@@ -232,11 +257,13 @@ class StereoAudioManager {
 
   /**
    * Speak text using text-to-speech.
+   * Stops any pending speech first to avoid queue buildup.
    */
   speak(text: string): void {
     if (!this.speechEnabled) return;
 
     try {
+      Speech.stop();
       Speech.speak(text, {
         rate: 1.3,
         pitch: 1.0,
@@ -248,7 +275,31 @@ class StereoAudioManager {
   }
 
   /**
-   * Announce a falling object: directional tone + speech.
+   * Speak text, returning a promise that resolves when speech finishes.
+   */
+  speakAndWait(text: string): Promise<void> {
+    if (!this.speechEnabled) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      try {
+        Speech.stop();
+        Speech.speak(text, {
+          rate: 1.3,
+          pitch: 1.0,
+          language: 'en-US',
+          onDone: () => resolve(),
+          onError: () => resolve(),
+          onStopped: () => resolve(),
+        });
+      } catch (e) {
+        console.warn('Speech failed:', e);
+        resolve();
+      }
+    });
+  }
+
+  /**
+   * Announce a falling object: directional tone + speech with lane context.
    */
   async announceObject(
     lane: Lane,
@@ -257,9 +308,9 @@ class StereoAudioManager {
   ): Promise<void> {
     await this.playDirectionalTone(lane, operationType);
 
-    // Small delay then speak the operation
+    // Include lane in speech so user knows direction even though TTS is not panned
     setTimeout(() => {
-      this.speak(speechText);
+      this.speak(`${lane}, ${speechText}`);
     }, 250);
   }
 
@@ -287,13 +338,7 @@ class StereoAudioManager {
         osc.stop(now + i * 0.1 + 0.5);
       });
     } else {
-      const uri = generateStereoWavDataUri(784, 300, 'center');
-      try {
-        const { sound } = await Audio.Sound.createAsync({ uri });
-        await sound.playAsync();
-      } catch (e) {
-        console.warn('Success sound failed:', e);
-      }
+      await this.playNativeTone('left', 784, 300); // reuse with center-ish tone
     }
   }
 
@@ -320,10 +365,28 @@ class StereoAudioManager {
       osc.start(now);
       osc.stop(now + 0.8);
     } else {
-      const uri = generateStereoWavDataUri(200, 500, 'center');
+      // Play a low centered tone for game over
       try {
-        const { sound } = await Audio.Sound.createAsync({ uri });
-        await sound.playAsync();
+        const cacheKey = 'gameover_center';
+        let sound = this.soundCache.get(cacheKey);
+        if (sound) {
+          await sound.setPositionAsync(0);
+          await sound.playAsync();
+          return;
+        }
+        let fileUri = this.fileCache.get(cacheKey);
+        if (!fileUri) {
+          const wavBytes = generateStereoWav(200, 500, 'center');
+          const base64 = uint8ArrayToBase64(wavBytes);
+          fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+          await FileSystem.writeAsStringAsync(fileUri, base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          this.fileCache.set(cacheKey, fileUri);
+        }
+        const { sound: s } = await Audio.Sound.createAsync({ uri: fileUri });
+        this.soundCache.set(cacheKey, s);
+        await s.playAsync();
       } catch (e) {
         console.warn('Game over sound failed:', e);
       }
@@ -355,6 +418,8 @@ class StereoAudioManager {
       panner.connect(ctx.destination);
       osc.start(now);
       osc.stop(now + 0.15);
+    } else {
+      await this.playNativeTone(lane, 880, 150);
     }
   }
 
@@ -377,6 +442,7 @@ class StereoAudioManager {
       }
     }
     this.soundCache.clear();
+    this.fileCache.clear();
 
     if (this.webAudioContext) {
       try {
