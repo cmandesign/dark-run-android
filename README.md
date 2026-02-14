@@ -80,6 +80,48 @@ eas build --platform android --profile preview
 └── package.json
 ```
 
+## CI/CD Pipeline
+
+### Continuous Integration (`.github/workflows/ci.yml`)
+
+Runs on every push and pull request:
+- TypeScript type checking
+- Web build verification
+
+### Release Pipeline (`.github/workflows/release.yml`)
+
+Creates a GitHub Release with both Web and Android builds. Two ways to trigger:
+
+**Option 1: Tag push**
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+**Option 2: Manual dispatch**
+1. Go to Actions tab in GitHub
+2. Select "Release" workflow
+3. Click "Run workflow"
+4. Enter a version number (e.g. `1.0.0`)
+
+The release will automatically:
+1. Type-check the project
+2. Build the web version and package as `dark-run-web.zip`
+3. Build the Android APK using Expo prebuild + Gradle
+4. Create a GitHub Release with both artifacts attached
+
+### Release Signing (Android)
+
+By default, the APK is signed with a debug key. For production releases, add a signing config:
+
+1. Generate a keystore: `keytool -genkey -v -keystore dark-run.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dark-run`
+2. Add these GitHub repository secrets:
+   - `KEYSTORE_BASE64` — base64-encoded keystore file
+   - `KEYSTORE_PASSWORD`
+   - `KEY_ALIAS`
+   - `KEY_PASSWORD`
+3. Update the release workflow's Android build step to use the signing config
+
 ## Tech Stack
 
 - **React Native** via Expo SDK 52
