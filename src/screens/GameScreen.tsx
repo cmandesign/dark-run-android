@@ -58,7 +58,7 @@ export default function GameScreen({
   const lastSpawnTime = useRef(0);
   const gameLoopRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioInitialized = useRef(false);
-  const [countdown, setCountdown] = useState(3);
+  const [countdown, setCountdown] = useState(-1); // -1 = waiting for intro speech
   const prevScoreRef = useRef(0);
 
   // Keep ref in sync with state
@@ -66,19 +66,28 @@ export default function GameScreen({
     gameStateRef.current = gameState;
   }, [gameState]);
 
-  // Initialize audio
+  // Initialize audio and announce level, then start countdown
   useEffect(() => {
-    if (!audioInitialized.current) {
-      stereoAudio.init();
-      audioInitialized.current = true;
-    }
+    let cancelled = false;
 
-    // Announce level start
-    stereoAudio.speak(
-      `Level ${level}. ${levelConfig.speechDescription}. Get ready!`
-    );
+    const start = async () => {
+      if (!audioInitialized.current) {
+        await stereoAudio.init();
+        audioInitialized.current = true;
+      }
+
+      // Wait for level intro to finish before starting countdown
+      await stereoAudio.speakAndWait(
+        `Level ${level}. ${levelConfig.speechDescription}. Get ready!`
+      );
+      if (cancelled) return;
+      setCountdown(3);
+    };
+
+    start();
 
     return () => {
+      cancelled = true;
       if (gameLoopRef.current) {
         clearInterval(gameLoopRef.current);
       }
@@ -87,6 +96,8 @@ export default function GameScreen({
 
   // Countdown before game starts
   useEffect(() => {
+    // Wait for intro speech to set countdown to 3
+    if (countdown < 0) return;
     if (countdown <= 0) return;
 
     const timer = setTimeout(() => {
@@ -103,7 +114,7 @@ export default function GameScreen({
 
   // Start game loop after countdown
   useEffect(() => {
-    if (countdown > 0) return;
+    if (countdown !== 0) return;
 
     lastSpawnTime.current = Date.now();
 
@@ -132,13 +143,9 @@ export default function GameScreen({
       const prevScore = newState.score;
       const updated = tick(newState);
 
-      // Announce score changes
+      // Play collect sound on score change (no speech — avoids queue congestion)
       if (updated.score !== prevScore) {
         stereoAudio.playCollect(state.playerLane);
-        // Announce new score after a brief delay
-        setTimeout(() => {
-          stereoAudio.speak(`${updated.score}`);
-        }, 200);
       }
 
       // Handle game over / level complete
@@ -215,14 +222,16 @@ export default function GameScreen({
     };
   }, [switchLane]);
 
-  // Render countdown overlay
-  if (countdown > 0) {
+  // Render countdown overlay (also shown during intro speech when countdown is -1)
+  if (countdown !== 0) {
     return (
       <View style={styles.container}>
         <View style={styles.countdownOverlay}>
           <Text style={styles.levelTitle}>Level {level}</Text>
           <Text style={styles.levelDesc}>{levelConfig.description}</Text>
-          <Text style={styles.countdownText}>{countdown}</Text>
+          <Text style={styles.countdownText}>
+            {countdown > 0 ? countdown : ''}
+          </Text>
         </View>
       </View>
     );
