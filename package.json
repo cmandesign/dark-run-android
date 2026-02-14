@@ -11,6 +11,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@expo/metro-runtime": "~4.0.1",
     "expo": "~52.0.46",
     "expo-av": "~15.0.2",
     "expo-speech": "~13.0.1",
