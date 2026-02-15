@@ -169,9 +169,13 @@ export default function GameScreen({
     return () => clearInterval(loop);
   }, [countdown]);
 
-  // Handle lane switch
+  // Handle lane switch — must also update ref so game loop sees the change
   const switchLane = useCallback((lane: Lane) => {
-    setGameState((prev) => movePlayer(prev, lane));
+    setGameState((prev) => {
+      const next = movePlayer(prev, lane);
+      gameStateRef.current = next;
+      return next;
+    });
   }, []);
 
   // Pan responder for swipe and tap gestures
