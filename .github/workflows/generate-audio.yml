@@ -46,7 +46,7 @@ jobs:
 
       - name: Force regenerate (delete existing audio)
         if: github.event.inputs.force_regenerate == 'true'
-        run: rm -rf assets/audio/${{ steps.locale.outputs.locale }}/*.mp3
+        run: rm -rf assets/audio/${{ steps.locale.outputs.locale }}/*
 
       - name: Generate audio files
         env:

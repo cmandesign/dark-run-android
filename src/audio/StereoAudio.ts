@@ -438,60 +438,11 @@ class StereoAudioManager {
   }
 
   /**
-   * Play a short stereo-panned tone to indicate the lane direction.
-   * Uses generateStereoWav which bakes the panning into the WAV data —
-   * this works reliably on all platforms unlike expo-av's audioPan parameter.
+   * Play a sequence of pre-recorded clips back-to-back.
+   * Stops early if the manager is stopped.
    */
-  private playLaneCue(lane: Lane): Promise<void> {
-    return new Promise(async (resolve) => {
-      try {
-        const cacheKey = `lane_cue_${lane}`;
-        let sound = this.soundCache.get(cacheKey);
-
-        if (!sound) {
-          const wavBytes = generateStereoWav(440, 80, lane);
-          const base64 = uint8ArrayToBase64(wavBytes);
-          const fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
-          await FileSystem.writeAsStringAsync(fileUri, base64, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          const result = await Audio.Sound.createAsync({ uri: fileUri });
-          sound = result.sound;
-          this.soundCache.set(cacheKey, sound);
-        } else {
-          await sound.setPositionAsync(0);
-        }
-
-        this.currentSound = sound;
-
-        sound.setOnPlaybackStatusUpdate((status) => {
-          if (status.isLoaded && status.didJustFinish) {
-            this.currentSound = null;
-            resolve();
-          }
-        });
-
-        await sound.playAsync();
-      } catch (e) {
-        console.warn('Lane cue failed:', e);
-        resolve();
-      }
-    });
-  }
-
-  /**
-   * Play a lane cue followed by a sequence of pre-recorded clips.
-   * The cue is a short stereo-panned tone, the speech is center.
-   */
-  private async playSequence(lane: Lane, keys: string[]): Promise<void> {
+  private async playSequence(keys: string[]): Promise<void> {
     this.speaking = true;
-
-    // Directional cue: short panned tone so you know which lane
-    if (!this.stopped) {
-      await this.playLaneCue(lane);
-    }
-
-    // Speech clips (center — clearer for comprehension)
     for (const key of keys) {
       if (this.stopped) break;
       const played = await this.playPreRecordedAndWait(key);
@@ -502,7 +453,7 @@ class StereoAudioManager {
 
   /**
    * Announce a falling object by composing operation + number clips.
-   * Plays a stereo-panned lane cue first, then the speech clips.
+   * Uses pre-panned WAV assets (_left/_right) so audio plays in the correct ear.
    * Falls back to TTS if any clip is missing.
    */
   announceObject(
@@ -513,15 +464,16 @@ class StereoAudioManager {
   ): void {
     if (this.stopped || !this.speechEnabled) return;
 
+    const suffix = lane === 'left' ? '_left' : '_right';
     const opKey = OP_TYPE_TO_KEY[operationType];
     const numKeys = numberToAssetKeys(Math.abs(value));
 
     if (opKey && numKeys.length > 0) {
-      const allKeys = [opKey, ...numKeys];
+      const allKeys = [opKey + suffix, ...numKeys.map((k) => k + suffix)];
       if (allKeys.every((k) => this.hasPreRecorded(k))) {
         this.stopCurrentPlayback();
         Speech.stop();
-        this.playSequence(lane, allKeys);
+        this.playSequence(allKeys);
         return;
       }
     }
