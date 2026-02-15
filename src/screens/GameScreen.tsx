@@ -90,17 +90,17 @@ export default function GameScreen({
     };
   }, []);
 
-  // Countdown before game starts
+  // Countdown before game starts — speak immediately, then decrement after 1s
   useEffect(() => {
     if (countdown < 0) return;
-    if (countdown <= 0) return;
+    if (countdown === 0) {
+      stereoAudio.speak('Go!', { type: 'countdown', value: 'go' });
+      return;
+    }
+
+    stereoAudio.speak(`${countdown}`, { type: 'countdown', value: countdown });
 
     const timer = setTimeout(() => {
-      if (countdown === 1) {
-        stereoAudio.speak('Go!', { type: 'countdown', value: 'go' });
-      } else {
-        stereoAudio.speak(`${countdown}`, { type: 'countdown', value: countdown });
-      }
       setCountdown((c) => c - 1);
     }, 1000);
 
@@ -144,16 +144,18 @@ export default function GameScreen({
         stereoAudio.playCollect(state.playerLane);
       }
 
-      // Handle level complete — update ref IMMEDIATELY to prevent re-firing
+      // Handle level complete — stop pending announcements first
       if (updated.levelComplete && !state.levelComplete) {
         gameStateRef.current = updated;
+        stereoAudio.stop();
         stereoAudio.playSuccess();
         stereoAudio.announceLevelComplete(level, updated.score);
       }
 
-      // Handle game over — update ref IMMEDIATELY to prevent re-firing
+      // Handle game over — stop pending announcements first
       if (updated.gameOver && !state.gameOver) {
         gameStateRef.current = updated;
+        stereoAudio.stop();
         stereoAudio.playGameOver();
         stereoAudio.announceGameOver(updated.score);
       }
@@ -172,28 +174,19 @@ export default function GameScreen({
     setGameState((prev) => movePlayer(prev, lane));
   }, []);
 
-  // Pan responder for swipe gestures
+  // Pan responder for swipe and tap gestures
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => {
-        return Math.abs(gestureState.dx) > 10;
-      },
-      onPanResponderGrant: (evt) => {
-        // Tap detection: determine lane by tap position
-        const touchX = evt.nativeEvent.pageX;
-        if (touchX < SCREEN_WIDTH / 2) {
-          switchLane('left');
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderRelease: (evt, gestureState) => {
+        if (Math.abs(gestureState.dx) > 30) {
+          // Swipe: use direction
+          switchLane(gestureState.dx > 0 ? 'right' : 'left');
         } else {
-          switchLane('right');
-        }
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        // Swipe detection
-        if (gestureState.dx < -30) {
-          switchLane('left');
-        } else if (gestureState.dx > 30) {
-          switchLane('right');
+          // Tap: use touch position
+          const touchX = evt.nativeEvent.pageX;
+          switchLane(touchX < SCREEN_WIDTH / 2 ? 'left' : 'right');
         }
       },
     })
@@ -254,6 +247,7 @@ export default function GameScreen({
           <TouchableOpacity
             style={styles.overlayButton}
             onPress={() => {
+              stereoAudio.stop();
               setGameState(createInitialState(levelConfig));
               setCountdown(3);
             }}
@@ -264,7 +258,10 @@ export default function GameScreen({
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.overlayButton, styles.secondaryButton]}
-            onPress={onBack}
+            onPress={() => {
+              stereoAudio.stop();
+              onBack();
+            }}
             accessibilityLabel="Back to menu"
             accessibilityRole="button"
           >
@@ -294,7 +291,10 @@ export default function GameScreen({
           </Text>
           <TouchableOpacity
             style={styles.overlayButton}
-            onPress={() => onNextLevel(level + 1)}
+            onPress={() => {
+              stereoAudio.stop();
+              onNextLevel(level + 1);
+            }}
             accessibilityLabel="Next level"
             accessibilityRole="button"
           >
@@ -302,7 +302,10 @@ export default function GameScreen({
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.overlayButton, styles.secondaryButton]}
-            onPress={onBack}
+            onPress={() => {
+              stereoAudio.stop();
+              onBack();
+            }}
             accessibilityLabel="Back to menu"
             accessibilityRole="button"
           >
@@ -319,7 +322,10 @@ export default function GameScreen({
       {/* HUD */}
       <View style={styles.hud} accessibilityRole="summary">
         <TouchableOpacity
-          onPress={onBack}
+          onPress={() => {
+            stereoAudio.stop();
+            onBack();
+          }}
           style={styles.backButton}
           accessibilityLabel="Back to menu"
           accessibilityRole="button"

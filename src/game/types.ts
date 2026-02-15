@@ -8,6 +8,12 @@ export interface Operation {
   speech: string; // e.g. "plus 3", "minus 2", "times 2", "divided by 2"
 }
 
+export interface OperationRange {
+  type: OperationType;
+  min: number;
+  max: number;
+}
+
 export interface FallingObject {
   id: string;
   lane: Lane;
@@ -35,7 +41,7 @@ export interface LevelConfig {
   targetScore: number;
   description: string;
   speechDescription: string;
-  availableOperations: Operation[];
+  operationRanges: OperationRange[];
   spawnIntervalMs: number; // time between spawns
   objectSpeed: number; // how fast objects fall
 }
