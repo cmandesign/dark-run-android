@@ -239,10 +239,9 @@ class StereoAudioManager {
 
   /**
    * Play a pre-recorded audio asset and wait for it to finish.
-   * Optional audioPan: -1.0 = full left, 0 = center, 1.0 = full right.
    * Returns true if played successfully, false if asset not found.
    */
-  private playPreRecordedAndWait(key: string, audioPan?: number): Promise<boolean> {
+  private playPreRecordedAndWait(key: string): Promise<boolean> {
     if (!this.hasPreRecorded(key)) return Promise.resolve(false);
 
     return new Promise(async (resolve) => {
@@ -255,11 +254,6 @@ class StereoAudioManager {
           this.soundCache.set(key, sound);
         } else {
           await sound.setPositionAsync(0);
-        }
-
-        // Apply stereo panning if specified
-        if (audioPan !== undefined) {
-          await sound.setVolumeAsync(1.0, audioPan);
         }
 
         this.currentSound = sound;
@@ -444,15 +438,63 @@ class StereoAudioManager {
   }
 
   /**
-   * Play a sequence of pre-recorded clips back-to-back.
-   * Optional audioPan applies stereo panning to all clips.
-   * Stops early if the manager is stopped.
+   * Play a short stereo-panned tone to indicate the lane direction.
+   * Uses generateStereoWav which bakes the panning into the WAV data —
+   * this works reliably on all platforms unlike expo-av's audioPan parameter.
    */
-  private async playSequence(keys: string[], audioPan?: number): Promise<void> {
+  private playLaneCue(lane: Lane): Promise<void> {
+    return new Promise(async (resolve) => {
+      try {
+        const cacheKey = `lane_cue_${lane}`;
+        let sound = this.soundCache.get(cacheKey);
+
+        if (!sound) {
+          const wavBytes = generateStereoWav(440, 80, lane);
+          const base64 = uint8ArrayToBase64(wavBytes);
+          const fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+          await FileSystem.writeAsStringAsync(fileUri, base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          const result = await Audio.Sound.createAsync({ uri: fileUri });
+          sound = result.sound;
+          this.soundCache.set(cacheKey, sound);
+        } else {
+          await sound.setPositionAsync(0);
+        }
+
+        this.currentSound = sound;
+
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            this.currentSound = null;
+            resolve();
+          }
+        });
+
+        await sound.playAsync();
+      } catch (e) {
+        console.warn('Lane cue failed:', e);
+        resolve();
+      }
+    });
+  }
+
+  /**
+   * Play a lane cue followed by a sequence of pre-recorded clips.
+   * The cue is a short stereo-panned tone, the speech is center.
+   */
+  private async playSequence(lane: Lane, keys: string[]): Promise<void> {
     this.speaking = true;
+
+    // Directional cue: short panned tone so you know which lane
+    if (!this.stopped) {
+      await this.playLaneCue(lane);
+    }
+
+    // Speech clips (center — clearer for comprehension)
     for (const key of keys) {
       if (this.stopped) break;
-      const played = await this.playPreRecordedAndWait(key, audioPan);
+      const played = await this.playPreRecordedAndWait(key);
       if (!played) break;
     }
     this.speaking = false;
@@ -460,7 +502,7 @@ class StereoAudioManager {
 
   /**
    * Announce a falling object by composing operation + number clips.
-   * Audio is panned to the lane: left ear for left lane, right ear for right.
+   * Plays a stereo-panned lane cue first, then the speech clips.
    * Falls back to TTS if any clip is missing.
    */
   announceObject(
@@ -471,7 +513,6 @@ class StereoAudioManager {
   ): void {
     if (this.stopped || !this.speechEnabled) return;
 
-    const audioPan = lane === 'left' ? -1.0 : 1.0;
     const opKey = OP_TYPE_TO_KEY[operationType];
     const numKeys = numberToAssetKeys(Math.abs(value));
 
@@ -480,12 +521,12 @@ class StereoAudioManager {
       if (allKeys.every((k) => this.hasPreRecorded(k))) {
         this.stopCurrentPlayback();
         Speech.stop();
-        this.playSequence(allKeys, audioPan);
+        this.playSequence(lane, allKeys);
         return;
       }
     }
 
-    // Fallback to TTS (no lane prefix — TTS doesn't support panning)
+    // Fallback to TTS (no panning available)
     this.stopCurrentPlayback();
     this.speakTTS(speechText);
   }
