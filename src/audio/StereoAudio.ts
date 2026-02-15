@@ -3,6 +3,48 @@ import { Audio } from 'expo-av';
 import * as Speech from 'expo-speech';
 import * as FileSystem from 'expo-file-system';
 import { Lane } from '../game/types';
+import { AUDIO_ASSETS } from './audioAssets';
+
+/** Map operation symbols to asset key prefixes. */
+const OP_TYPE_TO_KEY: Record<string, string> = {
+  '+': 'op_plus',
+  '-': 'op_minus',
+  '×': 'op_times',
+  '÷': 'op_divided_by',
+};
+
+/**
+ * Decompose a number (1–999) into a sequence of asset keys.
+ * Example: 153 → ["num_1", "num_hundred", "num_50", "num_3"]
+ *          15  → ["num_15"]
+ *          20  → ["num_20"]
+ */
+function numberToAssetKeys(n: number): string[] {
+  if (n <= 0 || n > 999) return [];
+  const keys: string[] = [];
+
+  const hundreds = Math.floor(n / 100);
+  if (hundreds > 0) {
+    keys.push(`num_${hundreds}`);
+    keys.push('num_hundred');
+    n = n % 100;
+  }
+
+  if (n > 0) {
+    if (n <= 19) {
+      keys.push(`num_${n}`);
+    } else {
+      const tens = Math.floor(n / 10) * 10;
+      keys.push(`num_${tens}`);
+      const ones = n % 10;
+      if (ones > 0) {
+        keys.push(`num_${ones}`);
+      }
+    }
+  }
+
+  return keys;
+}
 
 /**
  * Generates a stereo WAV file as a Uint8Array.
@@ -102,21 +144,27 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
     : Buffer.from(binary, 'binary').toString('base64');
 }
 
-// Frequency mapping for operation types
-const OPERATION_FREQUENCIES: Record<string, number> = {
-  '+': 523, // C5 - bright, positive
-  '-': 330, // E4 - lower, cautious
-  '×': 659, // E5 - high, exciting
-  '÷': 392, // G4 - medium
-};
-
+/**
+ * Single-threaded audio manager.
+ *
+ * Speech playback uses pre-recorded audio files when available (generated
+ * by scripts/generate-audio.js via ElevenLabs), falling back to the
+ * system TTS engine (expo-speech) for any entries not yet recorded.
+ *
+ * Stereo WAV tones (collect sounds) play independently.
+ */
 class StereoAudioManager {
   private webAudioContext: AudioContext | null = null;
   private initialized = false;
   private soundCache: Map<string, Audio.Sound> = new Map();
-  private fileCache: Map<string, string> = new Map(); // cacheKey -> file path
+  private fileCache: Map<string, string> = new Map();
   private audioEnabled = true;
   private speechEnabled = true;
+
+  // --- Single announcement queue ---
+  private speaking = false;
+  private stopped = false;
+  private currentSound: Audio.Sound | null = null;
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -130,7 +178,6 @@ class StereoAudioManager {
         }
       }
 
-      // Configure audio for mobile
       if (Platform.OS !== 'web') {
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
@@ -154,10 +201,224 @@ class StereoAudioManager {
     this.speechEnabled = enabled;
   }
 
+  // ─── Pre-recorded audio playback ───
+
   /**
-   * Stop any pending speech immediately.
+   * Check if a pre-recorded asset exists for the given key.
    */
-  stopSpeech(): void {
+  private hasPreRecorded(key: string): boolean {
+    return key in AUDIO_ASSETS && AUDIO_ASSETS[key] != null;
+  }
+
+  /**
+   * Play a pre-recorded audio asset by key.
+   * Returns true if playback started, false if asset not found.
+   */
+  private async playPreRecorded(key: string): Promise<boolean> {
+    if (!this.hasPreRecorded(key)) return false;
+
+    try {
+      let sound = this.soundCache.get(key);
+      if (sound) {
+        await sound.setPositionAsync(0);
+        await sound.playAsync();
+        this.currentSound = sound;
+        return true;
+      }
+
+      const { sound: newSound } = await Audio.Sound.createAsync(AUDIO_ASSETS[key]);
+      this.soundCache.set(key, newSound);
+      this.currentSound = newSound;
+      await newSound.playAsync();
+      return true;
+    } catch (e) {
+      console.warn(`Pre-recorded playback failed for "${key}":`, e);
+      return false;
+    }
+  }
+
+  /**
+   * Play a pre-recorded audio asset and wait for it to finish.
+   * Returns true if played successfully, false if asset not found.
+   */
+  private playPreRecordedAndWait(key: string): Promise<boolean> {
+    if (!this.hasPreRecorded(key)) return Promise.resolve(false);
+
+    return new Promise(async (resolve) => {
+      try {
+        let sound = this.soundCache.get(key);
+
+        if (!sound) {
+          const result = await Audio.Sound.createAsync(AUDIO_ASSETS[key]);
+          sound = result.sound;
+          this.soundCache.set(key, sound);
+        } else {
+          await sound.setPositionAsync(0);
+        }
+
+        this.currentSound = sound;
+
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            this.speaking = false;
+            this.currentSound = null;
+            resolve(true);
+          }
+        });
+
+        this.speaking = true;
+        await sound.playAsync();
+      } catch (e) {
+        console.warn(`Pre-recorded playback failed for "${key}":`, e);
+        this.speaking = false;
+        this.currentSound = null;
+        resolve(false);
+      }
+    });
+  }
+
+  // ─── Speech: single owner ───
+
+  /**
+   * Build an asset key from a text context.
+   * Returns undefined if no matching pattern is recognized.
+   */
+  private resolveAssetKey(
+    context?: { type: 'level_intro'; level: number }
+      | { type: 'countdown'; value: number | 'go' }
+      | { type: 'level_complete'; level: number }
+      | { type: 'game_over' }
+  ): string | undefined {
+    if (!context) return undefined;
+
+    switch (context.type) {
+      case 'level_intro':
+        return `level_intro_${context.level}`;
+      case 'countdown':
+        return context.value === 'go' ? 'countdown_go' : `countdown_${context.value}`;
+      case 'level_complete':
+        return `level_complete_${context.level}`;
+      case 'game_over':
+        return 'game_over';
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Interrupt any current speech/playback and speak new text immediately.
+   * Tries pre-recorded audio first, then falls back to TTS.
+   */
+  async speak(
+    text: string,
+    context?: { type: 'level_intro'; level: number }
+      | { type: 'countdown'; value: number | 'go' }
+      | { type: 'level_complete'; level: number }
+      | { type: 'game_over' }
+  ): Promise<void> {
+    if (!this.speechEnabled) return;
+
+    try {
+      this.stopped = false;
+
+      // Stop any current playback
+      this.stopCurrentPlayback();
+
+      // Try pre-recorded audio
+      const key = this.resolveAssetKey(context);
+      if (key) {
+        const played = await this.playPreRecorded(key);
+        if (played) {
+          this.speaking = true;
+          return;
+        }
+      }
+
+      // Fallback: TTS
+      this.speakTTS(text);
+    } catch (e) {
+      console.warn('Speech failed:', e);
+      this.speaking = false;
+    }
+  }
+
+  /**
+   * Fire-and-forget TTS fallback.
+   */
+  private speakTTS(text: string): void {
+    Speech.stop();
+    Speech.speak(text, {
+      rate: 1.3,
+      pitch: 1.0,
+      language: 'en-US',
+      onDone: () => { this.speaking = false; },
+      onError: () => { this.speaking = false; },
+      onStopped: () => { this.speaking = false; },
+    });
+    this.speaking = true;
+  }
+
+  /**
+   * Speak text and wait for it to finish before resolving.
+   * Tries pre-recorded audio first, then falls back to TTS.
+   */
+  async speakAndWait(
+    text: string,
+    context?: { type: 'level_intro'; level: number }
+      | { type: 'countdown'; value: number | 'go' }
+      | { type: 'level_complete'; level: number }
+      | { type: 'game_over' }
+  ): Promise<void> {
+    if (!this.speechEnabled) return;
+
+    try {
+      this.stopped = false;
+
+      // Stop any current playback
+      this.stopCurrentPlayback();
+
+      // Try pre-recorded audio
+      const key = this.resolveAssetKey(context);
+      if (key) {
+        const played = await this.playPreRecordedAndWait(key);
+        if (played) return;
+      }
+
+      // Fallback: TTS
+      return new Promise((resolve) => {
+        Speech.stop();
+        Speech.speak(text, {
+          rate: 1.3,
+          pitch: 1.0,
+          language: 'en-US',
+          onDone: () => {
+            this.speaking = false;
+            resolve();
+          },
+          onError: () => {
+            this.speaking = false;
+            resolve();
+          },
+          onStopped: () => {
+            this.speaking = false;
+            resolve();
+          },
+        });
+        this.speaking = true;
+      });
+    } catch (e) {
+      console.warn('Speech failed:', e);
+      this.speaking = false;
+    }
+  }
+
+  /**
+   * Stop all speech/playback and prevent queued callbacks from firing.
+   */
+  stop(): void {
+    this.stopped = true;
+    this.speaking = false;
+    this.stopCurrentPlayback();
     try {
       Speech.stop();
     } catch (_) {
@@ -165,236 +426,93 @@ class StereoAudioManager {
     }
   }
 
+  private stopCurrentPlayback(): void {
+    if (this.currentSound) {
+      try {
+        this.currentSound.stopAsync().catch(() => {});
+      } catch (_) {
+        // ignore
+      }
+      this.currentSound = null;
+    }
+  }
+
   /**
-   * Play a directional beep tone panned to the specified lane.
+   * Play a sequence of pre-recorded clips back-to-back.
+   * Stops early if the manager is stopped.
    */
-  async playDirectionalTone(
-    lane: Lane,
+  private async playSequence(keys: string[]): Promise<void> {
+    this.speaking = true;
+    for (const key of keys) {
+      if (this.stopped) break;
+      const played = await this.playPreRecordedAndWait(key);
+      if (!played) break;
+    }
+    this.speaking = false;
+  }
+
+  /**
+   * Announce a falling object by composing operation + number clips.
+   * Example: value=153, type='+' → plays "plus" "one" "hundred" "fifty" "three"
+   * Falls back to TTS if any clip is missing.
+   */
+  announceObject(
+    _lane: Lane,
     operationType: string,
-    durationMs: number = 200
-  ): Promise<void> {
-    if (!this.audioEnabled) return;
+    value: number,
+    speechText: string
+  ): void {
+    if (this.stopped || !this.speechEnabled) return;
 
-    const frequency = OPERATION_FREQUENCIES[operationType] || 440;
+    const opKey = OP_TYPE_TO_KEY[operationType];
+    const numKeys = numberToAssetKeys(Math.abs(value));
 
-    if (Platform.OS === 'web') {
-      this.playWebTone(lane, frequency, durationMs);
-    } else {
-      await this.playNativeTone(lane, frequency, durationMs);
-    }
-  }
-
-  private playWebTone(lane: Lane, frequency: number, durationMs: number) {
-    if (!this.webAudioContext) return;
-
-    if (this.webAudioContext.state === 'suspended') {
-      this.webAudioContext.resume();
-    }
-
-    const ctx = this.webAudioContext;
-    const oscillator = ctx.createOscillator();
-    const gainNode = ctx.createGain();
-    const panner = ctx.createStereoPanner();
-
-    oscillator.type = 'sine';
-    oscillator.frequency.value = frequency;
-    gainNode.gain.value = 0.4;
-    panner.pan.value = lane === 'left' ? -1 : 1;
-
-    const now = ctx.currentTime;
-    const endTime = now + durationMs / 1000;
-    gainNode.gain.setValueAtTime(0.4, now);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, endTime);
-
-    oscillator.connect(gainNode);
-    gainNode.connect(panner);
-    panner.connect(ctx.destination);
-
-    oscillator.start(now);
-    oscillator.stop(endTime);
-  }
-
-  /**
-   * Write a WAV to a temp file and play it.
-   * Data URIs don't work reliably with expo-av on Android.
-   */
-  private async playNativeTone(
-    lane: Lane,
-    frequency: number,
-    durationMs: number
-  ): Promise<void> {
-    try {
-      const cacheKey = `${lane}_${frequency}_${durationMs}`;
-
-      // Check if we already have a cached Sound object
-      let sound = this.soundCache.get(cacheKey);
-      if (sound) {
-        await sound.setPositionAsync(0);
-        await sound.playAsync();
+    if (opKey && numKeys.length > 0) {
+      const allKeys = [opKey, ...numKeys];
+      if (allKeys.every((k) => this.hasPreRecorded(k))) {
+        this.stopCurrentPlayback();
+        Speech.stop();
+        this.playSequence(allKeys);
         return;
       }
-
-      // Generate WAV and write to temp file
-      let fileUri = this.fileCache.get(cacheKey);
-      if (!fileUri) {
-        const wavBytes = generateStereoWav(frequency, durationMs, lane);
-        const base64 = uint8ArrayToBase64(wavBytes);
-        fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
-        await FileSystem.writeAsStringAsync(fileUri, base64, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        this.fileCache.set(cacheKey, fileUri);
-      }
-
-      const result = await Audio.Sound.createAsync({ uri: fileUri });
-      sound = result.sound;
-      this.soundCache.set(cacheKey, sound);
-      await sound.playAsync();
-    } catch (e) {
-      console.warn('Native tone playback failed:', e);
     }
+
+    // Fallback to TTS (no lane prefix)
+    this.stopCurrentPlayback();
+    this.speakTTS(speechText);
   }
 
   /**
-   * Speak text using text-to-speech.
-   * Stops any pending speech first to avoid queue buildup.
+   * Announce level complete.
+   * Pre-recorded: "Level N complete!" (without dynamic score).
+   * TTS fallback: "Level N complete! Score: X" (with score).
    */
-  speak(text: string): void {
-    if (!this.speechEnabled) return;
-
-    try {
-      Speech.stop();
-      Speech.speak(text, {
-        rate: 1.3,
-        pitch: 1.0,
-        language: 'en-US',
-      });
-    } catch (e) {
-      console.warn('Speech failed:', e);
-    }
-  }
-
-  /**
-   * Speak text, returning a promise that resolves when speech finishes.
-   */
-  speakAndWait(text: string): Promise<void> {
-    if (!this.speechEnabled) return Promise.resolve();
-
-    return new Promise((resolve) => {
-      try {
-        Speech.stop();
-        Speech.speak(text, {
-          rate: 1.3,
-          pitch: 1.0,
-          language: 'en-US',
-          onDone: () => resolve(),
-          onError: () => resolve(),
-          onStopped: () => resolve(),
-        });
-      } catch (e) {
-        console.warn('Speech failed:', e);
-        resolve();
-      }
-    });
-  }
-
-  /**
-   * Announce a falling object: directional tone + speech with lane context.
-   */
-  async announceObject(
-    lane: Lane,
-    operationType: string,
-    speechText: string
-  ): Promise<void> {
-    await this.playDirectionalTone(lane, operationType);
-
-    // Include lane in speech so user knows direction even though TTS is not panned
-    setTimeout(() => {
-      this.speak(`${lane}, ${speechText}`);
-    }, 250);
-  }
-
-  /**
-   * Play a celebration sound (centered, pleasant chord).
-   */
-  async playSuccess(): Promise<void> {
-    if (!this.audioEnabled) return;
-
-    if (Platform.OS === 'web' && this.webAudioContext) {
-      const ctx = this.webAudioContext;
-      if (ctx.state === 'suspended') await ctx.resume();
-
-      const now = ctx.currentTime;
-      [523, 659, 784].forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0.3, now + i * 0.1);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.1 + 0.5);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now + i * 0.1);
-        osc.stop(now + i * 0.1 + 0.5);
-      });
+  announceLevelComplete(level: number, score: number): void {
+    const key = `level_complete_${level}`;
+    if (this.hasPreRecorded(key)) {
+      this.speak(`Level ${level} complete!`, { type: 'level_complete', level });
     } else {
-      await this.playNativeTone('left', 784, 300); // reuse with center-ish tone
+      this.speak(`Level ${level} complete! Score: ${score}`);
     }
   }
 
   /**
-   * Play a game over sound.
+   * Announce game over.
+   * Pre-recorded: "Game over" (without dynamic score).
+   * TTS fallback: "Game over. Score: X" (with score).
    */
-  async playGameOver(): Promise<void> {
-    if (!this.audioEnabled) return;
-
-    if (Platform.OS === 'web' && this.webAudioContext) {
-      const ctx = this.webAudioContext;
-      if (ctx.state === 'suspended') await ctx.resume();
-
-      const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(300, now);
-      osc.frequency.exponentialRampToValueAtTime(100, now + 0.8);
-      gain.gain.setValueAtTime(0.3, now);
-      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.8);
+  announceGameOver(score: number): void {
+    if (this.hasPreRecorded('game_over')) {
+      this.speak('Game over', { type: 'game_over' });
     } else {
-      // Play a low centered tone for game over
-      try {
-        const cacheKey = 'gameover_center';
-        let sound = this.soundCache.get(cacheKey);
-        if (sound) {
-          await sound.setPositionAsync(0);
-          await sound.playAsync();
-          return;
-        }
-        let fileUri = this.fileCache.get(cacheKey);
-        if (!fileUri) {
-          const wavBytes = generateStereoWav(200, 500, 'center');
-          const base64 = uint8ArrayToBase64(wavBytes);
-          fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
-          await FileSystem.writeAsStringAsync(fileUri, base64, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          this.fileCache.set(cacheKey, fileUri);
-        }
-        const { sound: s } = await Audio.Sound.createAsync({ uri: fileUri });
-        this.soundCache.set(cacheKey, s);
-        await s.playAsync();
-      } catch (e) {
-        console.warn('Game over sound failed:', e);
-      }
+      this.speak(`Game over. Score: ${score}`);
     }
   }
 
+  // ─── Sound effects (stereo WAV, independent of TTS) ───
+
   /**
-   * Play a collect sound when player picks up an object.
+   * Play a stereo collect chirp panned to the lane where the object was picked up.
    */
   async playCollect(lane: Lane): Promise<void> {
     if (!this.audioEnabled) return;
@@ -424,16 +542,126 @@ class StereoAudioManager {
   }
 
   /**
-   * Announce score change via speech.
+   * Play a celebration sound.
    */
-  announceScore(score: number): void {
-    this.speak(`Score: ${score}`);
+  async playSuccess(): Promise<void> {
+    if (!this.audioEnabled) return;
+
+    if (Platform.OS === 'web' && this.webAudioContext) {
+      const ctx = this.webAudioContext;
+      if (ctx.state === 'suspended') await ctx.resume();
+
+      const now = ctx.currentTime;
+      [523, 659, 784].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.3, now + i * 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.1 + 0.5);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + i * 0.1);
+        osc.stop(now + i * 0.1 + 0.5);
+      });
+    } else {
+      await this.playNativeTone('left', 784, 300);
+    }
   }
 
   /**
-   * Clean up audio resources.
+   * Play a game over sound.
+   */
+  async playGameOver(): Promise<void> {
+    if (!this.audioEnabled) return;
+
+    if (Platform.OS === 'web' && this.webAudioContext) {
+      const ctx = this.webAudioContext;
+      if (ctx.state === 'suspended') await ctx.resume();
+
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(300, now);
+      osc.frequency.exponentialRampToValueAtTime(100, now + 0.8);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.8);
+    } else {
+      try {
+        const cacheKey = 'gameover_center';
+        let sound = this.soundCache.get(cacheKey);
+        if (sound) {
+          await sound.setPositionAsync(0);
+          await sound.playAsync();
+          return;
+        }
+        let fileUri = this.fileCache.get(cacheKey);
+        if (!fileUri) {
+          const wavBytes = generateStereoWav(200, 500, 'center');
+          const base64 = uint8ArrayToBase64(wavBytes);
+          fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+          await FileSystem.writeAsStringAsync(fileUri, base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          this.fileCache.set(cacheKey, fileUri);
+        }
+        const { sound: s } = await Audio.Sound.createAsync({ uri: fileUri });
+        this.soundCache.set(cacheKey, s);
+        await s.playAsync();
+      } catch (e) {
+        console.warn('Game over sound failed:', e);
+      }
+    }
+  }
+
+  // ─── Internal: native stereo tone via temp WAV file ───
+
+  private async playNativeTone(
+    lane: Lane,
+    frequency: number,
+    durationMs: number
+  ): Promise<void> {
+    try {
+      const cacheKey = `${lane}_${frequency}_${durationMs}`;
+
+      let sound = this.soundCache.get(cacheKey);
+      if (sound) {
+        await sound.setPositionAsync(0);
+        await sound.playAsync();
+        return;
+      }
+
+      let fileUri = this.fileCache.get(cacheKey);
+      if (!fileUri) {
+        const wavBytes = generateStereoWav(frequency, durationMs, lane);
+        const base64 = uint8ArrayToBase64(wavBytes);
+        fileUri = `${FileSystem.cacheDirectory}tone_${cacheKey}.wav`;
+        await FileSystem.writeAsStringAsync(fileUri, base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        this.fileCache.set(cacheKey, fileUri);
+      }
+
+      const result = await Audio.Sound.createAsync({ uri: fileUri });
+      sound = result.sound;
+      this.soundCache.set(cacheKey, sound);
+      await sound.playAsync();
+    } catch (e) {
+      console.warn('Native tone playback failed:', e);
+    }
+  }
+
+  /**
+   * Clean up all audio resources.
    */
   async cleanup(): Promise<void> {
+    this.stop();
+
     for (const sound of this.soundCache.values()) {
       try {
         await sound.unloadAsync();

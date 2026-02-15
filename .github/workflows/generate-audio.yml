@@ -1,0 +1,66 @@
+name: Generate Audio Assets
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      locale:
+        description: 'Locale to generate audio for'
+        required: false
+        default: 'en'
+      force_regenerate:
+        description: 'Force regenerate all files (delete existing first)'
+        required: false
+        type: boolean
+        default: false
+
+  # Auto-trigger when localization files change
+  push:
+    paths:
+      - 'src/audio/localization/*.json'
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Determine locale
+        id: locale
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "locale=${{ github.event.inputs.locale }}" >> $GITHUB_OUTPUT
+          else
+            echo "locale=en" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Force regenerate (delete existing audio)
+        if: github.event.inputs.force_regenerate == 'true'
+        run: rm -rf assets/audio/${{ steps.locale.outputs.locale }}/*.mp3
+
+      - name: Generate audio files
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+        run: node scripts/generate-audio.js ${{ steps.locale.outputs.locale }}
+
+      - name: Commit and push generated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add assets/audio/ src/audio/audioAssets.ts
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: generate audio assets for ${{ steps.locale.outputs.locale }}"
+            git push
+          fi

@@ -59,12 +59,6 @@ export default function GameScreen({
   const gameLoopRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioInitialized = useRef(false);
   const [countdown, setCountdown] = useState(-1); // -1 = waiting for intro speech
-  const prevScoreRef = useRef(0);
-
-  // Keep ref in sync with state
-  useEffect(() => {
-    gameStateRef.current = gameState;
-  }, [gameState]);
 
   // Initialize audio and announce level, then start countdown
   useEffect(() => {
@@ -78,7 +72,8 @@ export default function GameScreen({
 
       // Wait for level intro to finish before starting countdown
       await stereoAudio.speakAndWait(
-        `Level ${level}. ${levelConfig.speechDescription}. Get ready!`
+        `Level ${level}. ${levelConfig.speechDescription}. Get ready!`,
+        { type: 'level_intro', level }
       );
       if (cancelled) return;
       setCountdown(3);
@@ -88,6 +83,7 @@ export default function GameScreen({
 
     return () => {
       cancelled = true;
+      stereoAudio.stop();
       if (gameLoopRef.current) {
         clearInterval(gameLoopRef.current);
       }
@@ -96,15 +92,14 @@ export default function GameScreen({
 
   // Countdown before game starts
   useEffect(() => {
-    // Wait for intro speech to set countdown to 3
     if (countdown < 0) return;
     if (countdown <= 0) return;
 
     const timer = setTimeout(() => {
       if (countdown === 1) {
-        stereoAudio.speak('Go!');
+        stereoAudio.speak('Go!', { type: 'countdown', value: 'go' });
       } else {
-        stereoAudio.speak(`${countdown}`);
+        stereoAudio.speak(`${countdown}`, { type: 'countdown', value: countdown });
       }
       setCountdown((c) => c - 1);
     }, 1000);
@@ -131,10 +126,11 @@ export default function GameScreen({
         newState = addObject(newState, obj);
         lastSpawnTime.current = now;
 
-        // Announce the new object with stereo audio
+        // Announce the new object (composed audio: "plus" "three")
         stereoAudio.announceObject(
           obj.lane,
           obj.operation.type,
+          obj.operation.value,
           obj.operation.speech
         );
       }
@@ -143,25 +139,26 @@ export default function GameScreen({
       const prevScore = newState.score;
       const updated = tick(newState);
 
-      // Play collect sound on score change (no speech — avoids queue congestion)
+      // Play stereo collect chirp on score change
       if (updated.score !== prevScore) {
         stereoAudio.playCollect(state.playerLane);
       }
 
-      // Handle game over / level complete
+      // Handle level complete — update ref IMMEDIATELY to prevent re-firing
       if (updated.levelComplete && !state.levelComplete) {
+        gameStateRef.current = updated;
         stereoAudio.playSuccess();
-        setTimeout(() => {
-          stereoAudio.speak(`Level ${level} complete! Score: ${updated.score}`);
-        }, 500);
-      }
-      if (updated.gameOver && !state.gameOver) {
-        stereoAudio.playGameOver();
-        setTimeout(() => {
-          stereoAudio.speak(`Game over. Score: ${updated.score}`);
-        }, 500);
+        stereoAudio.announceLevelComplete(level, updated.score);
       }
 
+      // Handle game over — update ref IMMEDIATELY to prevent re-firing
+      if (updated.gameOver && !state.gameOver) {
+        gameStateRef.current = updated;
+        stereoAudio.playGameOver();
+        stereoAudio.announceGameOver(updated.score);
+      }
+
+      gameStateRef.current = updated;
       setGameState(updated);
     }, TICK_MS);
 

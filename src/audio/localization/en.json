@@ -1,0 +1,68 @@
+{
+  "locale": "en",
+  "voice": {
+    "provider": "elevenlabs",
+    "voiceId": "21m00Tcm4TlvDq8ikWAM",
+    "modelId": "eleven_flash_v2_5",
+    "settings": {
+      "stability": 0.7,
+      "similarity_boost": 0.8
+    }
+  },
+  "entries": {
+    "op_plus": "plus",
+    "op_minus": "minus",
+    "op_times": "times",
+    "op_divided_by": "divided by",
+
+    "num_1": "one",
+    "num_2": "two",
+    "num_3": "three",
+    "num_4": "four",
+    "num_5": "five",
+    "num_6": "six",
+    "num_7": "seven",
+    "num_8": "eight",
+    "num_9": "nine",
+    "num_10": "ten",
+    "num_11": "eleven",
+    "num_12": "twelve",
+    "num_13": "thirteen",
+    "num_14": "fourteen",
+    "num_15": "fifteen",
+    "num_16": "sixteen",
+    "num_17": "seventeen",
+    "num_18": "eighteen",
+    "num_19": "nineteen",
+    "num_20": "twenty",
+    "num_30": "thirty",
+    "num_40": "forty",
+    "num_50": "fifty",
+    "num_60": "sixty",
+    "num_70": "seventy",
+    "num_80": "eighty",
+    "num_90": "ninety",
+    "num_hundred": "hundred",
+
+    "level_intro_1": "Level 1. Reach a score of 10. Only addition! Get ready!",
+    "level_intro_2": "Level 2. Reach 15. Watch out for minus operations! Get ready!",
+    "level_intro_3": "Level 3. Reach 20. Plus and minus, getting faster! Get ready!",
+    "level_intro_4": "Level 4. Reach 30. Multiply is here! Get ready!",
+    "level_intro_5": "Level 5. Reach 50. All operations available! Get ready!",
+    "level_intro_6": "Level 6. Reach 100. Fast and furious! Get ready!",
+
+    "countdown_3": "3",
+    "countdown_2": "2",
+    "countdown_1": "1",
+    "countdown_go": "Go!",
+
+    "level_complete_1": "Level 1 complete!",
+    "level_complete_2": "Level 2 complete!",
+    "level_complete_3": "Level 3 complete!",
+    "level_complete_4": "Level 4 complete!",
+    "level_complete_5": "Level 5 complete!",
+    "level_complete_6": "Level 6 complete!",
+
+    "game_over": "Game over"
+  }
+}
