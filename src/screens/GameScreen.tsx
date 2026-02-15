@@ -126,10 +126,11 @@ export default function GameScreen({
         newState = addObject(newState, obj);
         lastSpawnTime.current = now;
 
-        // Announce the new object (speech only, includes lane: "left, plus 3")
+        // Announce the new object (composed audio: "plus" "three")
         stereoAudio.announceObject(
           obj.lane,
           obj.operation.type,
+          obj.operation.value,
           obj.operation.speech
         );
       }

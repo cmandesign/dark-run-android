@@ -5,6 +5,47 @@ import * as FileSystem from 'expo-file-system';
 import { Lane } from '../game/types';
 import { AUDIO_ASSETS } from './audioAssets';
 
+/** Map operation symbols to asset key prefixes. */
+const OP_TYPE_TO_KEY: Record<string, string> = {
+  '+': 'op_plus',
+  '-': 'op_minus',
+  '×': 'op_times',
+  '÷': 'op_divided_by',
+};
+
+/**
+ * Decompose a number (1–999) into a sequence of asset keys.
+ * Example: 153 → ["num_1", "num_hundred", "num_50", "num_3"]
+ *          15  → ["num_15"]
+ *          20  → ["num_20"]
+ */
+function numberToAssetKeys(n: number): string[] {
+  if (n <= 0 || n > 999) return [];
+  const keys: string[] = [];
+
+  const hundreds = Math.floor(n / 100);
+  if (hundreds > 0) {
+    keys.push(`num_${hundreds}`);
+    keys.push('num_hundred');
+    n = n % 100;
+  }
+
+  if (n > 0) {
+    if (n <= 19) {
+      keys.push(`num_${n}`);
+    } else {
+      const tens = Math.floor(n / 10) * 10;
+      keys.push(`num_${tens}`);
+      const ones = n % 10;
+      if (ones > 0) {
+        keys.push(`num_${ones}`);
+      }
+    }
+  }
+
+  return keys;
+}
+
 /**
  * Generates a stereo WAV file as a Uint8Array.
  * The tone is panned to the specified channel (left/right/center).
@@ -243,9 +284,7 @@ class StereoAudioManager {
    * Returns undefined if no matching pattern is recognized.
    */
   private resolveAssetKey(
-    text: string,
-    context?: { type: 'announce'; lane: Lane; speech: string }
-      | { type: 'level_intro'; level: number }
+    context?: { type: 'level_intro'; level: number }
       | { type: 'countdown'; value: number | 'go' }
       | { type: 'level_complete'; level: number }
       | { type: 'game_over' }
@@ -253,8 +292,6 @@ class StereoAudioManager {
     if (!context) return undefined;
 
     switch (context.type) {
-      case 'announce':
-        return `announce_${context.lane}_${context.speech.replace(/ /g, '_')}`;
       case 'level_intro':
         return `level_intro_${context.level}`;
       case 'countdown':
@@ -274,8 +311,7 @@ class StereoAudioManager {
    */
   async speak(
     text: string,
-    context?: { type: 'announce'; lane: Lane; speech: string }
-      | { type: 'level_intro'; level: number }
+    context?: { type: 'level_intro'; level: number }
       | { type: 'countdown'; value: number | 'go' }
       | { type: 'level_complete'; level: number }
       | { type: 'game_over' }
@@ -289,7 +325,7 @@ class StereoAudioManager {
       this.stopCurrentPlayback();
 
       // Try pre-recorded audio
-      const key = this.resolveAssetKey(text, context);
+      const key = this.resolveAssetKey(context);
       if (key) {
         const played = await this.playPreRecorded(key);
         if (played) {
@@ -299,26 +335,27 @@ class StereoAudioManager {
       }
 
       // Fallback: TTS
-      Speech.stop();
-      Speech.speak(text, {
-        rate: 1.3,
-        pitch: 1.0,
-        language: 'en-US',
-        onDone: () => {
-          this.speaking = false;
-        },
-        onError: () => {
-          this.speaking = false;
-        },
-        onStopped: () => {
-          this.speaking = false;
-        },
-      });
-      this.speaking = true;
+      this.speakTTS(text);
     } catch (e) {
       console.warn('Speech failed:', e);
       this.speaking = false;
     }
+  }
+
+  /**
+   * Fire-and-forget TTS fallback.
+   */
+  private speakTTS(text: string): void {
+    Speech.stop();
+    Speech.speak(text, {
+      rate: 1.3,
+      pitch: 1.0,
+      language: 'en-US',
+      onDone: () => { this.speaking = false; },
+      onError: () => { this.speaking = false; },
+      onStopped: () => { this.speaking = false; },
+    });
+    this.speaking = true;
   }
 
   /**
@@ -327,8 +364,7 @@ class StereoAudioManager {
    */
   async speakAndWait(
     text: string,
-    context?: { type: 'announce'; lane: Lane; speech: string }
-      | { type: 'level_intro'; level: number }
+    context?: { type: 'level_intro'; level: number }
       | { type: 'countdown'; value: number | 'go' }
       | { type: 'level_complete'; level: number }
       | { type: 'game_over' }
@@ -342,7 +378,7 @@ class StereoAudioManager {
       this.stopCurrentPlayback();
 
       // Try pre-recorded audio
-      const key = this.resolveAssetKey(text, context);
+      const key = this.resolveAssetKey(context);
       if (key) {
         const played = await this.playPreRecordedAndWait(key);
         if (played) return;
@@ -402,20 +438,48 @@ class StereoAudioManager {
   }
 
   /**
-   * Announce a falling object with lane context.
-   * Example: "left, plus 3"
+   * Play a sequence of pre-recorded clips back-to-back.
+   * Stops early if the manager is stopped.
+   */
+  private async playSequence(keys: string[]): Promise<void> {
+    this.speaking = true;
+    for (const key of keys) {
+      if (this.stopped) break;
+      const played = await this.playPreRecordedAndWait(key);
+      if (!played) break;
+    }
+    this.speaking = false;
+  }
+
+  /**
+   * Announce a falling object by composing operation + number clips.
+   * Example: value=153, type='+' → plays "plus" "one" "hundred" "fifty" "three"
+   * Falls back to TTS if any clip is missing.
    */
   announceObject(
-    lane: Lane,
-    _operationType: string,
+    _lane: Lane,
+    operationType: string,
+    value: number,
     speechText: string
   ): void {
-    if (this.stopped) return;
-    this.speak(`${lane}, ${speechText}`, {
-      type: 'announce',
-      lane,
-      speech: speechText,
-    });
+    if (this.stopped || !this.speechEnabled) return;
+
+    const opKey = OP_TYPE_TO_KEY[operationType];
+    const numKeys = numberToAssetKeys(Math.abs(value));
+
+    if (opKey && numKeys.length > 0) {
+      const allKeys = [opKey, ...numKeys];
+      if (allKeys.every((k) => this.hasPreRecorded(k))) {
+        this.stopCurrentPlayback();
+        Speech.stop();
+        this.playSequence(allKeys);
+        return;
+      }
+    }
+
+    // Fallback to TTS (no lane prefix)
+    this.stopCurrentPlayback();
+    this.speakTTS(speechText);
   }
 
   /**
