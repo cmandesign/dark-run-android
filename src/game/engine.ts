@@ -1,4 +1,25 @@
-import { FallingObject, GameState, Lane, LevelConfig, Operation } from './types';
+import { FallingObject, GameState, Lane, LevelConfig, Operation, OperationRange } from './types';
+
+const TYPE_WORDS: Record<string, string> = {
+  '+': 'plus',
+  '-': 'minus',
+  '×': 'times',
+  '÷': 'divided by',
+};
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function createOperation(range: OperationRange): Operation {
+  const value = randomInt(range.min, range.max);
+  return {
+    type: range.type,
+    value,
+    display: `${range.type}${value}`,
+    speech: `${TYPE_WORDS[range.type]} ${value}`,
+  };
+}
 
 let idCounter = 0;
 
@@ -20,10 +41,11 @@ export function createInitialState(levelConfig: LevelConfig): GameState {
 
 export function spawnObject(levelConfig: LevelConfig): FallingObject {
   const lane: Lane = Math.random() < 0.5 ? 'left' : 'right';
-  const operation =
-    levelConfig.availableOperations[
-      Math.floor(Math.random() * levelConfig.availableOperations.length)
+  const range =
+    levelConfig.operationRanges[
+      Math.floor(Math.random() * levelConfig.operationRanges.length)
     ];
+  const operation = createOperation(range);
 
   return {
     id: `obj_${++idCounter}`,

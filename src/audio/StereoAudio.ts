@@ -239,9 +239,10 @@ class StereoAudioManager {
 
   /**
    * Play a pre-recorded audio asset and wait for it to finish.
+   * Optional audioPan: -1.0 = full left, 0 = center, 1.0 = full right.
    * Returns true if played successfully, false if asset not found.
    */
-  private playPreRecordedAndWait(key: string): Promise<boolean> {
+  private playPreRecordedAndWait(key: string, audioPan?: number): Promise<boolean> {
     if (!this.hasPreRecorded(key)) return Promise.resolve(false);
 
     return new Promise(async (resolve) => {
@@ -254,6 +255,11 @@ class StereoAudioManager {
           this.soundCache.set(key, sound);
         } else {
           await sound.setPositionAsync(0);
+        }
+
+        // Apply stereo panning if specified
+        if (audioPan !== undefined) {
+          await sound.setVolumeAsync(1.0, audioPan);
         }
 
         this.currentSound = sound;
@@ -439,13 +445,14 @@ class StereoAudioManager {
 
   /**
    * Play a sequence of pre-recorded clips back-to-back.
+   * Optional audioPan applies stereo panning to all clips.
    * Stops early if the manager is stopped.
    */
-  private async playSequence(keys: string[]): Promise<void> {
+  private async playSequence(keys: string[], audioPan?: number): Promise<void> {
     this.speaking = true;
     for (const key of keys) {
       if (this.stopped) break;
-      const played = await this.playPreRecordedAndWait(key);
+      const played = await this.playPreRecordedAndWait(key, audioPan);
       if (!played) break;
     }
     this.speaking = false;
@@ -453,17 +460,18 @@ class StereoAudioManager {
 
   /**
    * Announce a falling object by composing operation + number clips.
-   * Example: value=153, type='+' → plays "plus" "one" "hundred" "fifty" "three"
+   * Audio is panned to the lane: left ear for left lane, right ear for right.
    * Falls back to TTS if any clip is missing.
    */
   announceObject(
-    _lane: Lane,
+    lane: Lane,
     operationType: string,
     value: number,
     speechText: string
   ): void {
     if (this.stopped || !this.speechEnabled) return;
 
+    const audioPan = lane === 'left' ? -1.0 : 1.0;
     const opKey = OP_TYPE_TO_KEY[operationType];
     const numKeys = numberToAssetKeys(Math.abs(value));
 
@@ -472,12 +480,12 @@ class StereoAudioManager {
       if (allKeys.every((k) => this.hasPreRecorded(k))) {
         this.stopCurrentPlayback();
         Speech.stop();
-        this.playSequence(allKeys);
+        this.playSequence(allKeys, audioPan);
         return;
       }
     }
 
-    // Fallback to TTS (no lane prefix)
+    // Fallback to TTS (no lane prefix — TTS doesn't support panning)
     this.stopCurrentPlayback();
     this.speakTTS(speechText);
   }
