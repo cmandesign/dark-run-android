@@ -8,6 +8,7 @@
     "web": "expo start --web",
     "build:android": "eas build --platform android --profile preview",
     "build:web": "npx expo export --platform web",
+    "deploy:web": "npx expo export --platform web && npx gh-pages -d dist",
     "lint": "eslint .",
     "generate-audio": "node scripts/generate-audio.js"
   },

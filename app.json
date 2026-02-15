@@ -28,6 +28,9 @@
     },
     "plugins": [
       "expo-av"
-    ]
+    ],
+    "experiments": {
+      "baseUrl": "/dark-run-android"
+    }
   }
 }
